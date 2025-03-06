@@ -6,27 +6,26 @@ TODO: modify get_access_token so it handles a request made with no connection to
 
 TODO: Create logic to update access using a timestamp instead of a stupid test request
 
-TODO: Test request_album(self) and set_album_info(self, album_response) methods
-
-
 """
 
 import requests
 import json
 import os
-import rich
 from collections import defaultdict
-from rich import print
-from rich.console import Console
-from rich.text import Text
 from time import time
+from dotenv import load_dotenv
+from PIL import Image
+from io import BytesIO
+
 
 #*----------------------------- STATIC AND GLOBAL VARIABLES -----------------------------
 
+load_dotenv()
 
-ROOT_SPOTIFY_URL = 'https://api.spotify.com/v1/'
-CLIENT_ID = 'ffbd6399354d4907bfd8a82a7d31dfd1'
-CLIENT_SECRET = '5e168a7cd54c4b6486d56e8ee2ce3eae'
+SPOTIFY_ROOT_URL = 'https://api.spotify.com/v1/'
+SPOTIFY_CLIENT_ID = os.getenv('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.getenv('SPOTIFY_CLIENT_SECRET')
+
 access_token, token_type, token_timestamp = None, None, None
 
 
@@ -59,52 +58,65 @@ class Album:
 
 
   # TODO: First, let's make sure the album data is retrieved correctly
+
+  # This function requests the album data from Spotify's API and stores it in the album instance by calling the helper method set_album_info
+
+  # This function is not intended to be called directly, but rather, it should be called by the __init
+  # method of the Album class
   def request_album(self):
     # 1. data required for the request
     global access_token, token_type
-    link = f'https://api.spotify.com/v1/albums/{self.ID}'
+    album_link = f'https://api.spotify.com/v1/albums/{self.ID}'
+    artist_link = f'{SPOTIFY_ROOT_URL}artists/'
 
-    if access_token is None:
-      load_access_token()
+    get_access_token()
 
     header = {
       'Authorization': f'{token_type} {access_token}', # AUTHORIZATION: Olivia Pierce
     }
     # 2. Making the requests
-    response = requests.get(link, headers=header)
+    album_response = requests.get(album_link, headers=header)
 
     # 3. Handling the request, first make sure the status code is OK
-    if response.status_code == 200:
-      self.set_album_info(response)
-    elif response.status_code == 401:
+    if album_response.status_code == 200:
+      artist_response = requests.get(f'{artist_link}{album_response.json()['artists'][0]['id']}', headers=header)
+      if artist_response.status_code == 200:
+        self.set_genre(artist_response)
+      self.set_album_info(album_response)
+    elif album_response.status_code == 401:
       print("[WARNING]: Session expired or invalid access token. Generating a new access token, try again")
       get_access_token()
     else:
       #? Not sure whether to code logic to retry a request within the function or outside. This statement will
       #? remain like this for the time being.
-      print(f"[ERROR]: Failed to retrieve album data. Status code {response.status_code}. Retry maybe?")
-
-
-
-
-
-
-
-
+      print(f"[ERROR]: Failed to retrieve album data. Status code {album_response.status_code}. Retry maybe?")
 
 # Helper method to load the tracks to the album instance
-# Theoretically works, but it is currently #!UNTESTED
   def set_album_info(self, album_response):
     
     album_response = album_response.json()
 
-    # Set album title and album artist
+    # Set album info that is shared by every track (title, year, cover image, etc)
     self.albumartists = [artist["name"] for artist in album_response["artists"]]
     self.title = album_response["name"]
     self.year = album_response["release_date"][:4]
     self.total_tracks = album_response["total_tracks"]
+    
+    # Saving album cover image as raw data
+    cover_link = album_response['images'][0]['url']
+    cover_link_response = requests.get(cover_link)
+    # If an image was obtained, we convert its format to make sure music-tag can accept it as jpeg data
+    if cover_link_response.status_code == 200:
+      image = Image.open(BytesIO(cover_link_response.content))
+      jpeg_buffer = BytesIO()
+      image.convert("RGB").save(jpeg_buffer, format='JPEG')
+      # then we pass the corrected bytes to the album's property:
+      self.cover_art = jpeg_buffer.getvalue()
+    else:
+      self.cover_art = None
+    # phew, that one part was a bit tough, at least for me lol
 
-    # Start adding the tracklist
+    # Start adding the tracklist as track objects with track specific metadata (track artists, track title, track number and disc number)
     for track_item in album_response["tracks"]["items"]:
       artists = [artist["name"] for artist in track_item["artists"]]
       # Append new item to tracklist list (duh)
@@ -112,13 +124,14 @@ class Album:
       self.tracklist[track_item["disc_number"]].append(track)
     print(f"Album info successfully attached to album class with id {self.ID}")
 
+# helper method to retrieve genre. Since genres are no longer attached to album response, it's necessary to make a new request to spotify API
+  def set_genre(self, artist_response):
+    if artist_response is None:
+      return
+    artist_response = artist_response.json()
+    self.genres = '; '.join(artist_response['genres'])
 
-
-
-
-
-
-
+# Pretty self explainatory I think
   def print_album_info(self):
     artists = ", ".join(self.albumartists)
     album_info = f"""Album information retrieved:
@@ -126,6 +139,7 @@ class Album:
     Title: {self.title}
     Artists: {artists}
     Year of release: {self.year}
+    genre(s): {self.genres}
 
 Tracklist:
 
@@ -144,7 +158,11 @@ Tracklist:
 
 # This seems to work properly :) but it still need to optimize the way it requests token... later
 
+# Loads an access token from a json file, if it exists, otherwise, it requests a new one
+# TODO: update logic to check if the access token is expired
+#! DEPRECATED: This function is no longer used, but it's kept here for reference
 def load_access_token():
+  # Check if the file exists
   if os.path.exists('access_token.json'):
     with open('access_token.json', 'r') as token_json:
       token_data = token_json.read()
@@ -157,7 +175,7 @@ def load_access_token():
       token_timestamp = token_data["timestamp"]
       print("[green][SUCCESS][/]: access token and token type variables successfully updated")
 
-    # In case the file it loads from is invalid or something  
+    # In case the file it loads from is invalid or something
     except json.decoder.JSONDecodeError:
       print("[ERROR]: access_token.json does not contain valid json data. Creating a new access token...")
       get_access_token()
@@ -165,24 +183,25 @@ def load_access_token():
     print("[WARNING]: no access token has been found, now requesting a new access token")
     get_access_token()
     
+    
+# TODO: Add logic to update the access token when it's expired
 
-
-
-
-# Seems to work just fine
-
+# This function modifies the global variables access_token token_type and token_timestamp and returns the access token query as a dictionary
+# ... It just works.
 def get_access_token():
   
-  # Constant declarations for this function, #! DO NOT MODIFY
+  # Constant declarations for this function
   global access_token, token_type, token_timestamp
+
   URL = "https://accounts.spotify.com/api/token"
+
   HEADER = {
     "Content-Type": "application/x-www-form-urlencoded"
   }
   DATA = {
     "grant_type": "client_credentials",
-    "client_id": CLIENT_ID,
-    "client_secret": CLIENT_SECRET
+    "client_id": SPOTIFY_CLIENT_ID,
+    "client_secret": SPOTIFY_CLIENT_SECRET
   }
 
   # First, let's make the request
@@ -208,49 +227,3 @@ def get_access_token():
     return None
 
   return response
-
-
-
-
-
-
-
-# ! DEPRECATED !
-def get_album(access_token, token_type, album_id):
-  header = {
-    'Authorization': f'{token_type} {access_token}',
-  }
-
-  data = {
-    'id': album_id
-  }
-
-  response = requests.get(f'https://api.spotify.com/v1/albums/{album_id}', headers=header)
-  return response
-
-
-
-#uncomment when the module is finished:
-#load_access_token()
-
-
-
-
-
-
-
-# ************************** MAIN FUNCTION, FOR TESTING ONLY **************************
-# This module is not intended to run as __main__, however, there is a main function to test 
-# the functions and class methods within this module. I'm no expert in testing, if you know 
-# a more efficient way to test these features, please let me know.
-
-
-if __name__ == "__main__":
-
-  converting_vegetarians = Album("3LbcBylGvC80f5OTeQaVuM")
-  converting_vegetarians.request_album()
-  converting_vegetarians.print_album_info()
-
-
-
-
